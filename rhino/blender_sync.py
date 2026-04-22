@@ -26,6 +26,11 @@ if _script_dir not in sys.path:
 import manifest as manifest_mod
 import mesh_utils
 
+# Force reload so edits take effect without restarting Rhino
+from importlib import reload
+reload(manifest_mod)
+reload(mesh_utils)
+
 
 def _get_output_dir():
     """Determine export directory from the active document path.
