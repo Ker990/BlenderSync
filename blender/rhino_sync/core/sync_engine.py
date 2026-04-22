@@ -230,7 +230,7 @@ def sync(manifest_path, presets_dir):
                 in_correct = any(c == collection for c in current_cols)
                 if not in_correct:
                     for col in current_cols:
-                        col.objects.unlink(obj)
+                        col.objects.unlink(blender_obj)
                     collection.objects.link(blender_obj)
 
             result.updated += 1

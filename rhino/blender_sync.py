@@ -86,9 +86,7 @@ def blender_sync(quality="preview"):
 
     for i, obj_entry in enumerate(manifest_data["objects"]):
         guid = obj_entry["guid"]
-        obj_id = System.Guid(guid) if hasattr(System, "Guid") else guid
 
-        # Use the GUID string to find the object via rhinoscriptsyntax
         success = mesh_utils.export_object(guid, output_dir, mesh_params)
         if success:
             exported += 1
