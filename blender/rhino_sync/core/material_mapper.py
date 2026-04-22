@@ -1,5 +1,6 @@
 """Material mapping — layer names to Principled BSDF presets."""
 
+import hashlib
 import json
 import os
 
@@ -23,12 +24,28 @@ MATERIAL_PRESETS = {
 }
 
 
-def _load_mapping_rules(presets_dir):
-    """Load material_map.json from the presets directory.
+def _layer_id_color(layer_name):
+    """Generate a unique, visually distinct color from a layer name.
 
-    Returns:
-        dict with 'rules' list and 'fallback' string
+    Uses a hash to produce deterministic HSV color with high saturation
+    and medium value — like V-Ray Object ID / Enscape random colors.
+    Same layer always gets the same color.
     """
+    h = int(hashlib.md5(layer_name.encode()).hexdigest()[:8], 16)
+
+    # Spread hue evenly, keep saturation high, value medium-bright
+    hue = (h % 360) / 360.0
+    saturation = 0.55 + (((h >> 12) % 30) / 100.0)  # 0.55–0.85
+    value = 0.60 + (((h >> 20) % 25) / 100.0)        # 0.60–0.85
+
+    # HSV to RGB
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb(hue, saturation, value)
+    return (r, g, b)
+
+
+def _load_mapping_rules(presets_dir):
+    """Load material_map.json from the presets directory."""
     map_path = os.path.join(presets_dir, "material_map.json")
     if not os.path.exists(map_path):
         return {"rules": [], "fallback": "Generic_Default"}
@@ -37,61 +54,50 @@ def _load_mapping_rules(presets_dir):
         return json.load(f)
 
 
-def _get_or_create_material(preset_name, layer_color=None):
-    """Get an existing material or create one from a preset.
+def _create_principled_material(name, base_color, roughness=0.5, metallic=0.0, extras=None):
+    """Create a Principled BSDF material with given parameters.
 
     Args:
-        preset_name: key into MATERIAL_PRESETS, or "Generic_Default"
-        layer_color: (R, G, B) 0-255 tuple for Generic fallback
+        name: material name
+        base_color: (R, G, B) floats 0-1
+        roughness: float 0-1
+        metallic: float 0-1
+        extras: dict of additional input values
 
     Returns:
         bpy.types.Material
     """
-    # Return existing if already created
-    mat = bpy.data.materials.get(preset_name)
+    mat = bpy.data.materials.get(name)
     if mat is not None:
         return mat
 
-    mat = bpy.data.materials.new(name=preset_name)
+    mat = bpy.data.materials.new(name=name)
     mat.use_nodes = True
     nodes = mat.node_tree.nodes
     nodes.clear()
 
-    # Create Principled BSDF
     bsdf = nodes.new(type="ShaderNodeBsdfPrincipled")
     bsdf.location = (0, 0)
 
-    # Create output
     output = nodes.new(type="ShaderNodeOutputMaterial")
     output.location = (300, 0)
     mat.node_tree.links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
 
-    # Apply preset values
-    if preset_name in MATERIAL_PRESETS:
-        color_rgb, roughness, metallic, extras = MATERIAL_PRESETS[preset_name]
-        bsdf.inputs["Base Color"].default_value = (
-            color_rgb[0], color_rgb[1], color_rgb[2], 1.0)
-        bsdf.inputs["Roughness"].default_value = roughness
-        bsdf.inputs["Metallic"].default_value = metallic
+    bsdf.inputs["Base Color"].default_value = (
+        base_color[0], base_color[1], base_color[2], 1.0)
+    bsdf.inputs["Roughness"].default_value = roughness
+    bsdf.inputs["Metallic"].default_value = metallic
 
+    if extras:
+        name_map = {
+            "Transmission Weight": "Transmission Weight",
+            "Ior": "IOR",
+        }
         for key, val in extras.items():
             input_name = key.replace("_", " ").title()
-            # Handle specific Blender 4.x+ input name mappings
-            name_map = {
-                "Transmission Weight": "Transmission Weight",
-                "Ior": "IOR",
-            }
             input_name = name_map.get(input_name, input_name)
             if input_name in bsdf.inputs:
                 bsdf.inputs[input_name].default_value = val
-    else:
-        # Generic fallback — use layer color if provided
-        if layer_color:
-            r, g, b = layer_color[0] / 255.0, layer_color[1] / 255.0, layer_color[2] / 255.0
-        else:
-            r, g, b = 0.7, 0.7, 0.7
-        bsdf.inputs["Base Color"].default_value = (r, g, b, 1.0)
-        bsdf.inputs["Roughness"].default_value = 0.5
 
     return mat
 
@@ -100,34 +106,34 @@ class MaterialMapper:
     """Maps layer names to Blender materials using keyword rules."""
 
     def __init__(self, presets_dir):
-        """Initialize with path to the presets directory.
-
-        Args:
-            presets_dir: path containing material_map.json
-        """
         mapping = _load_mapping_rules(presets_dir)
         self.rules = mapping.get("rules", [])
-        self.fallback = mapping.get("fallback", "Generic_Default")
 
     def get_material_for_layer(self, layer_path, layer_color=None):
         """Return a Blender material for the given layer path.
 
-        Matches layer path against rules (case-insensitive substring).
-        First match wins. Falls back to Generic with layer color.
-
-        Args:
-            layer_path: full Rhino layer path like "Level 1 :: Walls :: Exterior"
-            layer_color: (R, G, B) 0-255 tuple or None
-
-        Returns:
-            bpy.types.Material
+        Priority:
+        1. Keyword match from material_map.json → preset material
+        2. No match → unique Layer ID color (deterministic from layer name)
         """
         layer_lower = layer_path.lower()
 
+        # Check keyword rules first
         for rule in self.rules:
             keyword = rule["match"].lower()
             if keyword in layer_lower:
-                return _get_or_create_material(rule["material"])
+                preset_name = rule["material"]
+                if preset_name in MATERIAL_PRESETS:
+                    color, rough, metal, extras = MATERIAL_PRESETS[preset_name]
+                    return _create_principled_material(
+                        preset_name, color, rough, metal, extras)
 
-        # Fallback — use layer color for Generic
-        return _get_or_create_material(self.fallback, layer_color)
+        # No match — generate Layer ID material
+        # Use the layer name as the material name so each layer is unique
+        safe_name = "Layer_{}".format(layer_path.replace("::", "_").replace(" ", ""))
+        mat = bpy.data.materials.get(safe_name)
+        if mat is not None:
+            return mat
+
+        color = _layer_id_color(layer_path)
+        return _create_principled_material(safe_name, color, roughness=0.5)
