@@ -79,9 +79,9 @@ def build_manifest(quality="preview"):
         dict with keys: source_file, exported_at, quality, units, layers, objects
     """
     doc = Rhino.RhinoDoc.ActiveDoc
-    file_path = doc.Path
-    if file_path:
-        source_file = os.path.join(file_path, doc.Name)
+    # doc.Path is the full file path (dir + filename) in Rhino 8
+    if doc.Path:
+        source_file = doc.Path
     else:
         source_file = doc.Name or "Untitled"
 

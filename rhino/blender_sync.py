@@ -39,8 +39,10 @@ def _get_output_dir():
         print("[BlenderSync] Error: Save the Rhino file first.")
         return None
 
-    file_name = os.path.splitext(doc.Name)[0]
-    return os.path.join(doc.Path, "{}_blender".format(file_name))
+    # doc.Path is the full file path (dir + filename) in Rhino 8
+    doc_dir = os.path.dirname(doc.Path)
+    file_name = os.path.splitext(os.path.basename(doc.Path))[0]
+    return os.path.join(doc_dir, "{}_blender".format(file_name))
 
 
 def _ensure_dirs(output_dir):
