@@ -264,18 +264,56 @@ def sync(manifest_path, presets_dir):
 
             result.added += 1
 
-    # --- BLOCK INSTANCES ---
+    # --- BLOCK INSTANCES (Collection Instances) ---
     block_defs = manifest.data.get("block_definitions", {})
     block_instances = manifest.data.get("block_instances", [])
 
-    # Import block definition meshes (one per definition, shared across instances)
-    def_meshes = {}
+    # Build definition collections — one collection per block def,
+    # containing separate objects for each sub-piece with its own material
+    BLOCK_DEFS_COLLECTION = "_Block Definitions"
+    block_defs_root = _ensure_collection(BLOCK_DEFS_COLLECTION)
+    # Hide the definitions collection — only instances are visible
+    block_defs_root.hide_viewport = True
+    block_defs_root.hide_render = True
+
+    def_collections = {}
     for def_name, def_info in block_defs.items():
-        mesh_file = os.path.join(manifest.project_dir, def_info["mesh_file"])
-        mesh_data = _import_obj_mesh(mesh_file)
-        if mesh_data:
-            mesh_data.name = "Block_{}".format(def_name)
-            def_meshes[def_name] = mesh_data
+        pieces = def_info.get("pieces", [])
+        if not pieces:
+            continue
+
+        # Create or find the definition collection
+        def_col = _ensure_collection(def_name, block_defs_root)
+
+        # Clear old objects from def collection on re-sync
+        for old_obj in list(def_col.objects):
+            def_col.objects.unlink(old_obj)
+            if old_obj.data and old_obj.data.users <= 1:
+                bpy.data.meshes.remove(old_obj.data)
+            bpy.data.objects.remove(old_obj, do_unlink=True)
+
+        # Import each piece as a separate object with its own material
+        for piece in pieces:
+            mesh_file = os.path.join(manifest.project_dir, piece["mesh_file"])
+            piece_layer = piece.get("layer", "")
+            piece_idx = piece.get("index", 0)
+
+            mesh_data = _import_obj_mesh(mesh_file)
+            if mesh_data is None:
+                continue
+
+            piece_name = "{}_piece_{}".format(def_name[:20], piece_idx)
+            mesh_data.name = piece_name
+            piece_obj = bpy.data.objects.new(piece_name, mesh_data)
+
+            # Assign material based on the internal layer
+            layer_color = manifest.layer_color(piece_layer)
+            mat_bl = mapper.get_material_for_layer(piece_layer, layer_color)
+            piece_obj.data.materials.append(mat_bl)
+
+            def_col.objects.link(piece_obj)
+
+        def_collections[def_name] = def_col
 
     # Track block instance GUIDs
     block_instance_guids = set()
@@ -287,8 +325,8 @@ def sync(manifest_path, presets_dir):
         xform_list = inst.get("transform", [])
         block_instance_guids.add(inst_id)
 
-        mesh_data = def_meshes.get(def_name)
-        if mesh_data is None:
+        def_col = def_collections.get(def_name)
+        if def_col is None:
             continue
 
         collection = layer_collections.get(layer_path)
@@ -308,22 +346,21 @@ def sync(manifest_path, presets_dir):
             mat = Matrix.Identity(4)
 
         if inst_id in existing_guids:
-            # Update existing block instance
+            # Update existing instance empty — just update transform
             blender_obj = existing_guids[inst_id]
-            # Swap mesh to current definition mesh (shared)
-            if blender_obj.data != mesh_data:
-                old_mesh = blender_obj.data
-                blender_obj.data = mesh_data
-                if old_mesh.users == 0:
-                    bpy.data.meshes.remove(old_mesh)
             blender_obj.matrix_world = mat
+            # Update collection reference if definition changed
+            if blender_obj.instance_collection != def_col:
+                blender_obj.instance_collection = def_col
             blender_obj.hide_set(False)
             blender_obj.hide_render = False
             result.updated += 1
         else:
-            # Add new block instance — linked duplicate (shared mesh)
-            obj_name = "{}_{}".format(def_name, inst_id[:8])
-            blender_obj = bpy.data.objects.new(obj_name, mesh_data)
+            # Add new collection instance (empty that renders the definition)
+            obj_name = "{}_{}".format(def_name[:20], inst_id[:8])
+            blender_obj = bpy.data.objects.new(obj_name, None)
+            blender_obj.instance_type = 'COLLECTION'
+            blender_obj.instance_collection = def_col
             blender_obj[RHINO_GUID_KEY] = inst_id
             blender_obj.matrix_world = mat
 
@@ -331,12 +368,6 @@ def sync(manifest_path, presets_dir):
                 collection.objects.link(blender_obj)
             else:
                 bpy.context.scene.collection.objects.link(blender_obj)
-
-            # Material from layer
-            layer_color = manifest.layer_color(layer_path)
-            mat_bl = mapper.get_material_for_layer(layer_path, layer_color)
-            if len(blender_obj.data.materials) == 0:
-                blender_obj.data.materials.append(mat_bl)
 
             result.added += 1
 

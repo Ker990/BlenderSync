@@ -114,7 +114,8 @@ def _xform_to_list(xform):
 def _collect_definition_geometry(idef, depth=0):
     """Recursively collect meshable geometry from a block definition.
 
-    Returns list of (geometry, xform) tuples in definition-local coords.
+    Returns list of (geometry, xform, layer_name) tuples in definition-local coords.
+    Layer name is the internal layer of the sub-object (for material mapping).
     """
     if depth > _MAX_BLOCK_DEPTH:
         _print("  Warning: max block nesting depth reached for '{}'".format(idef.Name))
@@ -126,15 +127,18 @@ def _collect_definition_geometry(idef, depth=0):
             if isinstance(rhino_obj, Rhino.DocObjects.InstanceObject):
                 nested_idef = rhino_obj.InstanceDefinition
                 nested_xform = rhino_obj.InstanceXform
-                for geom, child_xform in _collect_definition_geometry(nested_idef, depth + 1):
+                for geom, child_xform, layer_name in _collect_definition_geometry(nested_idef, depth + 1):
                     composed = nested_xform * child_xform
-                    pieces.append((geom, composed))
+                    pieces.append((geom, composed, layer_name))
             else:
                 geom = rhino_obj.Geometry
                 if isinstance(geom, Rhino.Geometry.Extrusion):
                     geom = geom.ToBrep(True)
                 if isinstance(geom, (Rhino.Geometry.Brep, Rhino.Geometry.Surface)):
-                    pieces.append((geom.Duplicate(), Rhino.Geometry.Transform.Identity))
+                    # Get internal layer name for material mapping
+                    layer_idx = rhino_obj.Attributes.LayerIndex
+                    layer_name = sc.doc.Layers[layer_idx].FullPath
+                    pieces.append((geom.Duplicate(), Rhino.Geometry.Transform.Identity, layer_name))
     except Exception as e:
         _print("  Warning: error reading block '{}': {}".format(idef.Name, e))
 
@@ -254,8 +258,16 @@ def build_manifest(quality="preview"):
     block_definitions = {}
     block_instances = []
     for def_name, def_data in block_defs.items():
+        # Record each sub-piece with its layer for material mapping
+        pieces_info = []
+        for i, (geom, xform, layer_name) in enumerate(def_data["geometry"]):
+            pieces_info.append({
+                "index": i,
+                "mesh_file": "blocks/{}/piece_{}.obj".format(def_name, i),
+                "layer": layer_name,
+            })
         block_definitions[def_name] = {
-            "mesh_file": "blocks/{}.obj".format(def_name),
+            "pieces": pieces_info,
         }
         for inst in def_data["instances"]:
             block_instances.append(inst)

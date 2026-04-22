@@ -156,12 +156,12 @@ def blender_sync(quality="preview"):
             dn, len(dd["geometry"]), len(dd["instances"])))
     blocks_exported = 0
     for def_name, def_data in block_defs.items():
-        success = mesh_utils.export_block_definition(
+        piece_count = mesh_utils.export_block_definition(
             def_name, def_data["geometry"], output_dir, mesh_params)
-        if success:
+        if piece_count > 0:
             blocks_exported += 1
         else:
-            # Remove from manifest if mesh failed
+            # Remove from manifest if no pieces exported
             manifest_data["block_definitions"].pop(def_name, None)
             manifest_data["block_instances"] = [
                 inst for inst in manifest_data["block_instances"]

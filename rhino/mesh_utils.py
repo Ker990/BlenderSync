@@ -161,43 +161,52 @@ def export_object(obj_id, output_dir, mesh_params):
 
 
 def export_block_definition(def_name, geometry_pieces, output_dir, mesh_params):
-    """Mesh all geometry in a block definition and write as single OBJ.
+    """Mesh each sub-object in a block definition as a separate OBJ.
 
     Args:
         def_name: block definition name
-        geometry_pieces: list of (geometry, xform) tuples from manifest._collect_definition_geometry
+        geometry_pieces: list of (geometry, xform, layer_name) tuples
         output_dir: root export directory
         mesh_params: Rhino.Geometry.MeshingParameters
 
     Returns:
-        True on success, False on failure
+        int: number of pieces successfully exported
     """
-    combined = Rhino.Geometry.Mesh()
+    # Create subfolder for this definition
+    def_dir = os.path.join(output_dir, "blocks", def_name)
+    if not os.path.exists(def_dir):
+        os.makedirs(def_dir)
 
-    for geom, xform in geometry_pieces:
+    exported = 0
+    for i, (geom, xform, layer_name) in enumerate(geometry_pieces):
         # Transform geometry to definition-local coords (for nested blocks)
         if not xform.Equals(Rhino.Geometry.Transform.Identity):
             geom = geom.Duplicate()
             geom.Transform(xform)
 
+        mesh = Rhino.Geometry.Mesh()
+
         if isinstance(geom, Rhino.Geometry.Brep):
             meshes = Rhino.Geometry.Mesh.CreateFromBrep(geom, mesh_params)
             if meshes:
                 for m in meshes:
-                    combined.Append(m)
+                    mesh.Append(m)
         elif isinstance(geom, Rhino.Geometry.Surface):
             brep = geom.ToBrep()
             if brep:
                 meshes = Rhino.Geometry.Mesh.CreateFromBrep(brep, mesh_params)
                 if meshes:
                     for m in meshes:
-                        combined.Append(m)
+                        mesh.Append(m)
 
-    if combined.Vertices.Count == 0:
-        return False
+        if mesh.Vertices.Count == 0:
+            continue
 
-    combined.Normals.ComputeNormals()
-    combined.Compact()
+        mesh.Normals.ComputeNormals()
+        mesh.Compact()
 
-    filepath = os.path.join(output_dir, "blocks", "{}.obj".format(def_name))
-    return write_obj(combined, filepath)
+        filepath = os.path.join(def_dir, "piece_{}.obj".format(i))
+        if write_obj(mesh, filepath):
+            exported += 1
+
+    return exported
