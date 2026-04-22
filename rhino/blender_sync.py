@@ -66,6 +66,41 @@ def _clean_meshes(meshes_dir):
                 os.remove(os.path.join(meshes_dir, f))
 
 
+def _log_recent_export(export_dir, source_file):
+    """Append this export to recent_exports.json so Blender can find it."""
+    import json
+    recent_path = os.path.join(_script_dir, "..", "recent_exports.json")
+    recent_path = os.path.normpath(recent_path)
+
+    recent = []
+    if os.path.exists(recent_path):
+        try:
+            with open(recent_path, "r") as f:
+                recent = json.load(f)
+        except (ValueError, IOError):
+            recent = []
+
+    # Build entry
+    entry = {
+        "export_dir": export_dir,
+        "source_file": source_file,
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+    # Remove existing entry for same export_dir, add new at top
+    recent = [r for r in recent if r.get("export_dir") != export_dir]
+    recent.insert(0, entry)
+
+    # Keep last 20
+    recent = recent[:20]
+
+    try:
+        with open(recent_path, "w") as f:
+            json.dump(recent, f, indent=2)
+    except IOError:
+        pass  # Non-critical — don't fail the export
+
+
 def blender_sync(quality="preview"):
     """Main export function.
 
@@ -119,6 +154,9 @@ def blender_sync(quality="preview"):
     if failed:
         print("[BlenderSync] {} objects skipped (meshing failed)".format(failed))
     print("[BlenderSync] Quality: {} | Time: {:.1f}s".format(quality, elapsed))
+
+    # Log to recent_exports.json so Blender addon can find this project
+    _log_recent_export(output_dir, manifest_data.get("source_file", ""))
 
 
 # --- Entry point ---

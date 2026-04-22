@@ -1,13 +1,45 @@
 """Rhino Sync — N-panel UI for 3D Viewport sidebar."""
 
+import json
 import os
 import time
 
 import bpy
-from bpy.props import StringProperty, PointerProperty
+from bpy.props import StringProperty, EnumProperty, PointerProperty
 
 from ..core.sync_engine import sync, RHINO_GUID_KEY
 from ..core.manifest_reader import get_manifest_mtime
+
+
+# Path to shared recent_exports.json (written by Rhino exporter)
+_RECENT_EXPORTS_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "recent_exports.json")
+)
+
+
+def _load_recent_exports():
+    """Load recent exports list from shared JSON file."""
+    if not os.path.exists(_RECENT_EXPORTS_PATH):
+        return []
+    try:
+        with open(_RECENT_EXPORTS_PATH, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def _recent_exports_enum(self, context):
+    """Dynamic enum items for the recent exports dropdown."""
+    recent = _load_recent_exports()
+    items = [("NONE", "Select a project...", "", 0)]
+    for i, entry in enumerate(recent):
+        export_dir = entry.get("export_dir", "")
+        source = entry.get("source_file", "")
+        # Show the Rhino filename as the label
+        label = os.path.basename(source) if source else os.path.basename(export_dir)
+        desc = export_dir
+        items.append((export_dir, label, desc, i + 1))
+    return items
 
 
 class RhinoSyncSettings(bpy.types.PropertyGroup):
@@ -19,6 +51,11 @@ class RhinoSyncSettings(bpy.types.PropertyGroup):
         subtype='DIR_PATH',
         default="",
     )
+    recent_project: EnumProperty(
+        name="Recent Projects",
+        description="Recently exported Rhino projects",
+        items=_recent_exports_enum,
+    )
     last_sync_time: StringProperty(
         name="Last Sync",
         default="",
@@ -29,6 +66,23 @@ class RhinoSyncSettings(bpy.types.PropertyGroup):
     )
     object_count: bpy.props.IntProperty(name="Objects", default=0)
     layer_count: bpy.props.IntProperty(name="Layers", default=0)
+
+
+class RHINOSYNC_OT_pick_recent(bpy.types.Operator):
+    """Set project folder from recent exports list"""
+
+    bl_idname = "rhino_sync.pick_recent"
+    bl_label = "Use Selected Project"
+    bl_description = "Set the project folder to the selected recent export"
+
+    def execute(self, context):
+        settings = context.scene.rhino_sync
+        selected = settings.recent_project
+        if selected and selected != "NONE":
+            settings.project_folder = selected
+            self.report({'INFO'}, "Project set to: {}".format(
+                os.path.basename(selected)))
+        return {'FINISHED'}
 
 
 class RHINOSYNC_OT_sync(bpy.types.Operator):
@@ -86,7 +140,15 @@ class VIEW3D_PT_rhino_sync(bpy.types.Panel):
         layout = self.layout
         settings = context.scene.rhino_sync
 
-        # Project folder
+        # Recent projects picker
+        box = layout.box()
+        box.label(text="Recent Exports:", icon='FILE_FOLDER')
+        box.prop(settings, "recent_project", text="")
+        box.operator("rhino_sync.pick_recent", icon='CHECKMARK')
+
+        layout.separator()
+
+        # Manual project folder (fallback)
         layout.prop(settings, "project_folder", text="Project")
 
         # Check for updates
@@ -119,6 +181,7 @@ class VIEW3D_PT_rhino_sync(bpy.types.Panel):
 # Classes to register (order matters — PropertyGroup before users)
 classes = (
     RhinoSyncSettings,
+    RHINOSYNC_OT_pick_recent,
     RHINOSYNC_OT_sync,
     VIEW3D_PT_rhino_sync,
 )

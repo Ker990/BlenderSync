@@ -20,6 +20,7 @@ from bpy.props import PointerProperty
 
 from .ui.panel import (
     RhinoSyncSettings,
+    RHINOSYNC_OT_pick_recent,
     RHINOSYNC_OT_sync,
     VIEW3D_PT_rhino_sync,
 )
@@ -27,6 +28,7 @@ from .ui.panel import (
 
 classes = (
     RhinoSyncSettings,
+    RHINOSYNC_OT_pick_recent,
     RHINOSYNC_OT_sync,
     VIEW3D_PT_rhino_sync,
 )
