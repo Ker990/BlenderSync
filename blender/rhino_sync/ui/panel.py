@@ -12,9 +12,7 @@ from ..core.manifest_reader import get_manifest_mtime
 
 
 # Path to shared recent_exports.json (written by Rhino exporter)
-_RECENT_EXPORTS_PATH = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "recent_exports.json")
-)
+_RECENT_EXPORTS_PATH = "D:/BlenderSync/recent_exports.json"
 
 
 def _load_recent_exports():
