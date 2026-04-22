@@ -5,6 +5,7 @@ import json
 import os
 import time
 
+import System
 import Rhino
 import scriptcontext as sc
 
@@ -35,6 +36,27 @@ def _get_visible_layers():
     return layers
 
 
+def _get_visible_layer_indices():
+    """Return set of layer indices where the layer AND all parents are visible."""
+    visible = set()
+    for layer in sc.doc.Layers:
+        if layer.IsDeleted:
+            continue
+        is_visible = True
+        check = layer
+        while check is not None:
+            if not check.IsVisible:
+                is_visible = False
+                break
+            parent_id = check.ParentLayerId
+            if parent_id == System.Guid.Empty:
+                break
+            check = sc.doc.Layers.FindId(parent_id)
+        if is_visible:
+            visible.add(layer.Index)
+    return visible
+
+
 def _collect_all_objects():
     """Walk all doc objects once, classify by layer. Much faster than per-layer queries.
 
@@ -42,12 +64,7 @@ def _collect_all_objects():
         dict: {layer_full_path: {"breps": [obj_id, ...], "blocks": [obj_id, ...]}}
     """
     result = {}
-    visible_layers = set()
-
-    # Pre-build visible layer lookup
-    for layer in sc.doc.Layers:
-        if not layer.IsDeleted and layer.IsVisible:
-            visible_layers.add(layer.Index)
+    visible_layers = _get_visible_layer_indices()
 
     for rhino_obj in sc.doc.Objects:
         # Skip hidden objects
@@ -153,10 +170,7 @@ def _collect_block_definitions():
     """
     definitions = {}
 
-    visible_layers = set()
-    for layer in sc.doc.Layers:
-        if not layer.IsDeleted and layer.IsVisible:
-            visible_layers.add(layer.Index)
+    visible_layers = _get_visible_layer_indices()
 
     for idef in sc.doc.InstanceDefinitions:
         if idef.IsDeleted:
