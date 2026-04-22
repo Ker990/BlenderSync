@@ -1,0 +1,18 @@
+{
+  "rules": [
+    {"match": "concrete", "material": "Concrete_Default"},
+    {"match": "glass", "material": "Glass_Default"},
+    {"match": "wood", "material": "Wood_Default"},
+    {"match": "timber", "material": "Wood_Default"},
+    {"match": "metal", "material": "Metal_Default"},
+    {"match": "steel", "material": "Metal_Default"},
+    {"match": "aluminum", "material": "Metal_Default"},
+    {"match": "brick", "material": "Brick_Default"},
+    {"match": "plaster", "material": "Plaster_Default"},
+    {"match": "drywall", "material": "Plaster_Default"},
+    {"match": "gypsum", "material": "Plaster_Default"},
+    {"match": "insulation", "material": "Insulation_Default"},
+    {"match": "membrane", "material": "Membrane_Default"}
+  ],
+  "fallback": "Generic_Default"
+}
