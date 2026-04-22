@@ -287,35 +287,19 @@ def sync(manifest_path, presets_dir):
 
             result.added += 1
 
-    # --- BLOCK INSTANCES (Collection Instances) ---
+    # --- BLOCK INSTANCES (Real geometry, shared mesh data) ---
     block_defs = manifest.data.get("block_definitions", {})
     block_instances = manifest.data.get("block_instances", [])
 
-    # Build definition collections — one collection per block def,
-    # containing separate objects for each sub-piece with its own material
-    BLOCK_DEFS_COLLECTION = "_Block Definitions"
-    block_defs_root = _ensure_collection(BLOCK_DEFS_COLLECTION)
-    # Hide the definitions collection — only instances are visible
-    block_defs_root.hide_viewport = True
-    block_defs_root.hide_render = True
-
-    def_collections = {}
+    # Import definition piece meshes once — shared across all instances
+    # def_piece_meshes[def_name] = [(mesh_data, material), ...]
+    def_piece_data = {}
     for def_name, def_info in block_defs.items():
         pieces = def_info.get("pieces", [])
         if not pieces:
             continue
 
-        # Create or find the definition collection
-        def_col = _ensure_collection(def_name, block_defs_root)
-
-        # Clear old objects from def collection on re-sync
-        for old_obj in list(def_col.objects):
-            def_col.objects.unlink(old_obj)
-            if old_obj.data and old_obj.data.users <= 1:
-                bpy.data.meshes.remove(old_obj.data)
-            bpy.data.objects.remove(old_obj, do_unlink=True)
-
-        # Import each piece as a separate object with its own material
+        piece_list = []
         for piece in pieces:
             mesh_file = os.path.join(manifest.project_dir, piece["mesh_file"])
             piece_layer = piece.get("layer", "")
@@ -325,18 +309,16 @@ def sync(manifest_path, presets_dir):
             if mesh_data is None:
                 continue
 
-            piece_name = "{}_piece_{}".format(def_name[:20], piece_idx)
-            mesh_data.name = piece_name
-            piece_obj = bpy.data.objects.new(piece_name, mesh_data)
+            mesh_data.name = "BlockDef_{}_{}".format(def_name[:20], piece_idx)
 
-            # Assign material based on the internal layer
+            # Get material for this piece's internal layer
             layer_color = manifest.layer_color(piece_layer)
             mat_bl = mapper.get_material_for_layer(piece_layer, layer_color)
-            piece_obj.data.materials.append(mat_bl)
 
-            def_col.objects.link(piece_obj)
+            piece_list.append((mesh_data, mat_bl))
 
-        def_collections[def_name] = def_col
+        if piece_list:
+            def_piece_data[def_name] = piece_list
 
     # Track block instance GUIDs
     block_instance_guids = set()
@@ -348,8 +330,8 @@ def sync(manifest_path, presets_dir):
         xform_list = inst.get("transform", [])
         block_instance_guids.add(inst_id)
 
-        def_col = def_collections.get(def_name)
-        if def_col is None:
+        piece_list = def_piece_data.get(def_name)
+        if piece_list is None:
             continue
 
         collection = layer_collections.get(layer_path)
@@ -359,38 +341,48 @@ def sync(manifest_path, presets_dir):
 
         # Build 4x4 matrix from row-major flat list
         if len(xform_list) == 16:
-            mat = Matrix((
+            xform_mat = Matrix((
                 xform_list[0:4],
                 xform_list[4:8],
                 xform_list[8:12],
                 xform_list[12:16],
             ))
         else:
-            mat = Matrix.Identity(4)
+            xform_mat = Matrix.Identity(4)
+
+        target_col = collection or bpy.context.scene.collection
 
         if inst_id in existing_guids:
-            # Update existing instance empty — just update transform
+            # Update: find existing objects for this instance and update transforms
             blender_obj = existing_guids[inst_id]
-            blender_obj.matrix_world = mat
-            # Update collection reference if definition changed
-            if blender_obj.instance_collection != def_col:
-                blender_obj.instance_collection = def_col
+            blender_obj.matrix_world = xform_mat
             blender_obj.hide_set(False)
             blender_obj.hide_render = False
+            # Also update children
+            for child in blender_obj.children:
+                child.hide_set(False)
+                child.hide_render = False
             result.updated += 1
         else:
-            # Add new collection instance (empty that renders the definition)
-            obj_name = "{}_{}".format(def_name[:20], inst_id[:8])
-            blender_obj = bpy.data.objects.new(obj_name, None)
-            blender_obj.instance_type = 'COLLECTION'
-            blender_obj.instance_collection = def_col
-            blender_obj[RHINO_GUID_KEY] = inst_id
-            blender_obj.matrix_world = mat
+            # Create an empty as the instance root (for transform + GUID tracking)
+            root_name = "{}_{}".format(def_name[:20], inst_id[:8])
+            root_empty = bpy.data.objects.new(root_name, None)
+            root_empty.empty_display_size = 0.01
+            root_empty.empty_display_type = 'PLAIN_AXES'
+            root_empty[RHINO_GUID_KEY] = inst_id
+            root_empty.matrix_world = xform_mat
+            target_col.objects.link(root_empty)
 
-            if collection:
-                collection.objects.link(blender_obj)
-            else:
-                bpy.context.scene.collection.objects.link(blender_obj)
+            # Create real objects for each piece, parented to the root
+            for pi, (mesh_data, mat_bl) in enumerate(piece_list):
+                piece_name = "{}_{}_p{}".format(def_name[:15], inst_id[:6], pi)
+                piece_obj = bpy.data.objects.new(piece_name, mesh_data)
+                piece_obj.parent = root_empty
+
+                # Per-object material slot (can override independently)
+                piece_obj.data.materials.append(mat_bl)
+
+                target_col.objects.link(piece_obj)
 
             result.added += 1
 
