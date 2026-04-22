@@ -55,15 +55,20 @@ def _ensure_dirs(output_dir):
     meshes_dir = os.path.join(output_dir, "meshes")
     if not os.path.exists(meshes_dir):
         os.makedirs(meshes_dir)
+    blocks_dir = os.path.join(output_dir, "blocks")
+    if not os.path.exists(blocks_dir):
+        os.makedirs(blocks_dir)
     return meshes_dir
 
 
-def _clean_meshes(meshes_dir):
+def _clean_exports(output_dir):
     """Remove old OBJ files before re-export."""
-    if os.path.exists(meshes_dir):
-        for f in os.listdir(meshes_dir):
-            if f.endswith(".obj"):
-                os.remove(os.path.join(meshes_dir, f))
+    for subdir in ("meshes", "blocks"):
+        dirpath = os.path.join(output_dir, subdir)
+        if os.path.exists(dirpath):
+            for f in os.listdir(dirpath):
+                if f.endswith(".obj"):
+                    os.remove(os.path.join(dirpath, f))
 
 
 def _log_recent_export(export_dir, source_file):
@@ -114,15 +119,14 @@ def blender_sync(quality="preview"):
         return
 
     meshes_dir = _ensure_dirs(output_dir)
-    _clean_meshes(meshes_dir)
+    _clean_exports(output_dir)
 
     # Build manifest
     print("[BlenderSync] Building manifest...")
     manifest_data = manifest_mod.build_manifest(quality)
 
-    # Mesh and export each object
+    # Mesh and export each regular object
     mesh_params = mesh_utils.get_mesh_params(quality)
-    total = len(manifest_data["objects"])
     exported = 0
     failed = 0
 
@@ -143,14 +147,31 @@ def blender_sync(quality="preview"):
         if os.path.exists(os.path.join(output_dir, o["mesh_file"]))
     ]
 
+    # Export block definitions
+    block_defs = manifest_mod._collect_block_definitions()
+    blocks_exported = 0
+    for def_name, def_data in block_defs.items():
+        success = mesh_utils.export_block_definition(
+            def_name, def_data["geometry"], output_dir, mesh_params)
+        if success:
+            blocks_exported += 1
+        else:
+            # Remove from manifest if mesh failed
+            manifest_data["block_definitions"].pop(def_name, None)
+            manifest_data["block_instances"] = [
+                inst for inst in manifest_data["block_instances"]
+                if inst["definition"] != def_name
+            ]
+
     # Write manifest
     manifest_path = os.path.join(output_dir, "manifest.json")
     manifest_mod.write_manifest(manifest_data, manifest_path)
 
     elapsed = time.time() - t0
     layer_count = len(manifest_data["layers"])
-    print("[BlenderSync] Exported {} objects across {} layers -> {}".format(
-        exported, layer_count, output_dir))
+    block_inst_count = len(manifest_data.get("block_instances", []))
+    print("[BlenderSync] Exported {} objects + {} block defs ({} instances) across {} layers -> {}".format(
+        exported, blocks_exported, block_inst_count, layer_count, output_dir))
     if failed:
         print("[BlenderSync] {} objects skipped (meshing failed)".format(failed))
     print("[BlenderSync] Quality: {} | Time: {:.1f}s".format(quality, elapsed))

@@ -40,8 +40,14 @@ class Manifest:
         return {o["guid"] for o in self.objects}
 
     def layer_paths(self):
-        """Return list of unique layer paths."""
-        return [l["path"] for l in self.layers]
+        """Return list of unique layer paths (from layers + block instances)."""
+        paths = [l["path"] for l in self.layers]
+        # Also include layer paths from block instances
+        for inst in self.data.get("block_instances", []):
+            lp = inst.get("layer", "")
+            if lp and lp not in paths:
+                paths.append(lp)
+        return paths
 
     def layer_color(self, layer_path):
         """Return (R, G, B) tuple for a layer, or None."""

@@ -18,10 +18,33 @@ def get_mesh_params(quality):
     Returns:
         Rhino.Geometry.MeshingParameters
     """
+    mp = Rhino.Geometry.MeshingParameters()
+    mp.SimplePlanes = True  # Critical — flat surfaces get minimal tris
+    mp.JaggedSeams = False
+    mp.ComputeNormals = True
+
     if quality == "final":
-        return Rhino.Geometry.MeshingParameters.Smooth
+        mp.Tolerance = 0.001          # ~0.3mm
+        mp.RelativeTolerance = 0.1
+        mp.RefineAngle = 0.15         # ~8.5 degrees — smooth curves
+        mp.MinimumEdgeLength = 0.003  # ~1mm floor
+        mp.MaximumEdgeLength = 10.0   # ~3m ceiling
+        mp.GridAspectRatio = 4.0
+        mp.GridMinCount = 1
+        mp.GridMaxCount = 256
+        mp.GridAngle = 0.15
+        mp.RefineGrid = True
     else:
-        return Rhino.Geometry.MeshingParameters.Coarse
+        mp.Tolerance = 0.01           # ~3mm
+        mp.RelativeTolerance = 0.5
+        mp.RefineAngle = 0.5          # ~28 degrees
+        mp.MinimumEdgeLength = 0.01   # ~3mm floor
+        mp.MaximumEdgeLength = 30.0   # ~10m ceiling
+        mp.GridAspectRatio = 6.0
+        mp.GridMinCount = 0
+        mp.GridMaxCount = 64
+
+    return mp
 
 
 def brep_to_mesh(obj_id, mesh_params):
@@ -135,3 +158,46 @@ def export_object(obj_id, output_dir, mesh_params):
     guid_str = str(obj_id)
     filepath = os.path.join(output_dir, "meshes", "{}.obj".format(guid_str))
     return write_obj(mesh, filepath)
+
+
+def export_block_definition(def_name, geometry_pieces, output_dir, mesh_params):
+    """Mesh all geometry in a block definition and write as single OBJ.
+
+    Args:
+        def_name: block definition name
+        geometry_pieces: list of (geometry, xform) tuples from manifest._collect_definition_geometry
+        output_dir: root export directory
+        mesh_params: Rhino.Geometry.MeshingParameters
+
+    Returns:
+        True on success, False on failure
+    """
+    combined = Rhino.Geometry.Mesh()
+
+    for geom, xform in geometry_pieces:
+        # Transform geometry to definition-local coords (for nested blocks)
+        if not xform.Equals(Rhino.Geometry.Transform.Identity):
+            geom = geom.Duplicate()
+            geom.Transform(xform)
+
+        if isinstance(geom, Rhino.Geometry.Brep):
+            meshes = Rhino.Geometry.Mesh.CreateFromBrep(geom, mesh_params)
+            if meshes:
+                for m in meshes:
+                    combined.Append(m)
+        elif isinstance(geom, Rhino.Geometry.Surface):
+            brep = geom.ToBrep()
+            if brep:
+                meshes = Rhino.Geometry.Mesh.CreateFromBrep(brep, mesh_params)
+                if meshes:
+                    for m in meshes:
+                        combined.Append(m)
+
+    if combined.Vertices.Count == 0:
+        return False
+
+    combined.Normals.ComputeNormals()
+    combined.Compact()
+
+    filepath = os.path.join(output_dir, "blocks", "{}.obj".format(def_name))
+    return write_obj(combined, filepath)

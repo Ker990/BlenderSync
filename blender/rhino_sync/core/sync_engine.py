@@ -2,6 +2,7 @@
 
 import os
 import time
+from mathutils import Matrix
 
 import bpy
 
@@ -263,9 +264,88 @@ def sync(manifest_path, presets_dir):
 
             result.added += 1
 
+    # --- BLOCK INSTANCES ---
+    block_defs = manifest.data.get("block_definitions", {})
+    block_instances = manifest.data.get("block_instances", [])
+
+    # Import block definition meshes (one per definition, shared across instances)
+    def_meshes = {}
+    for def_name, def_info in block_defs.items():
+        mesh_file = os.path.join(manifest.project_dir, def_info["mesh_file"])
+        mesh_data = _import_obj_mesh(mesh_file)
+        if mesh_data:
+            mesh_data.name = "Block_{}".format(def_name)
+            def_meshes[def_name] = mesh_data
+
+    # Track block instance GUIDs
+    block_instance_guids = set()
+
+    for inst in block_instances:
+        inst_id = inst.get("instance_id", "")
+        def_name = inst.get("definition", "")
+        layer_path = inst.get("layer", "")
+        xform_list = inst.get("transform", [])
+        block_instance_guids.add(inst_id)
+
+        mesh_data = def_meshes.get(def_name)
+        if mesh_data is None:
+            continue
+
+        collection = layer_collections.get(layer_path)
+        if collection is None and layer_path:
+            collection = _ensure_collection_path(layer_path)
+            layer_collections[layer_path] = collection
+
+        # Build 4x4 matrix from row-major flat list
+        if len(xform_list) == 16:
+            mat = Matrix((
+                xform_list[0:4],
+                xform_list[4:8],
+                xform_list[8:12],
+                xform_list[12:16],
+            ))
+        else:
+            mat = Matrix.Identity(4)
+
+        if inst_id in existing_guids:
+            # Update existing block instance
+            blender_obj = existing_guids[inst_id]
+            # Swap mesh to current definition mesh (shared)
+            if blender_obj.data != mesh_data:
+                old_mesh = blender_obj.data
+                blender_obj.data = mesh_data
+                if old_mesh.users == 0:
+                    bpy.data.meshes.remove(old_mesh)
+            blender_obj.matrix_world = mat
+            blender_obj.hide_set(False)
+            blender_obj.hide_render = False
+            result.updated += 1
+        else:
+            # Add new block instance — linked duplicate (shared mesh)
+            obj_name = "{}_{}".format(def_name, inst_id[:8])
+            blender_obj = bpy.data.objects.new(obj_name, mesh_data)
+            blender_obj[RHINO_GUID_KEY] = inst_id
+            blender_obj.matrix_world = mat
+
+            if collection:
+                collection.objects.link(blender_obj)
+            else:
+                bpy.context.scene.collection.objects.link(blender_obj)
+
+            # Material from layer
+            layer_color = manifest.layer_color(layer_path)
+            mat_bl = mapper.get_material_for_layer(layer_path, layer_color)
+            if len(blender_obj.data.materials) == 0:
+                blender_obj.data.materials.append(mat_bl)
+
+            result.added += 1
+
+    # Combine all manifest GUIDs (regular + block instances)
+    all_manifest_guids = manifest_guids | block_instance_guids
+
     # Handle removed objects (in existing but not in manifest)
     for guid, obj in existing_guids.items():
-        if guid not in manifest_guids:
+        if guid not in all_manifest_guids:
             _move_to_removed(obj)
             result.removed += 1
 
