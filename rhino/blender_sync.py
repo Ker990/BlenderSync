@@ -119,27 +119,37 @@ def blender_sync(quality="preview"):
         return
 
     meshes_dir = _ensure_dirs(output_dir)
-    _clean_exports(output_dir)
 
     # Build manifest
     print("[BlenderSync] Building manifest...")
     manifest_data = manifest_mod.build_manifest(quality)
 
-    # Mesh and export each regular object
+    # Determine which objects need re-meshing (skip cached)
     mesh_params = mesh_utils.get_mesh_params(quality)
     exported = 0
+    cached = 0
     failed = 0
 
+    total_objs = len(manifest_data["objects"])
     for i, obj_entry in enumerate(manifest_data["objects"]):
         guid = obj_entry["guid"]
+        obj_path = os.path.join(output_dir, obj_entry["mesh_file"])
+
+        # Skip if OBJ already exists (cached from previous export)
+        if os.path.exists(obj_path):
+            cached += 1
+            continue
 
         success = mesh_utils.export_object(guid, output_dir, mesh_params)
         if success:
             exported += 1
         else:
             failed += 1
-            print("[BlenderSync]   Skipped: {} (meshing failed)".format(
-                obj_entry.get("name", guid)))
+
+        # Progress every 50 objects
+        if (exported + failed) % 50 == 0:
+            print("[BlenderSync]   Meshing: {}/{} (cached: {})".format(
+                exported + failed + cached, total_objs, cached))
 
     # Remove failed objects from manifest
     manifest_data["objects"] = [
@@ -147,19 +157,29 @@ def blender_sync(quality="preview"):
         if os.path.exists(os.path.join(output_dir, o["mesh_file"]))
     ]
 
-    # Export block definitions
+    print("[BlenderSync] Objects: {} meshed, {} cached, {} failed".format(
+        exported, cached, failed))
+
+    # Export block definitions (skip if folder already has OBJs)
     print("[BlenderSync] Scanning for block instances...")
     block_defs = manifest_mod._collect_block_definitions()
     print("[BlenderSync] Found {} block definitions".format(len(block_defs)))
-    for dn, dd in block_defs.items():
-        print("[BlenderSync]   '{}': {} geometry pieces, {} instances".format(
-            dn, len(dd["geometry"]), len(dd["instances"])))
+
     blocks_exported = 0
+    blocks_cached = 0
     for def_name, def_data in block_defs.items():
+        # Check if this definition's pieces already exist
+        def_dir = os.path.join(output_dir, "blocks", def_name)
+        if os.path.isdir(def_dir) and any(f.endswith(".obj") for f in os.listdir(def_dir)):
+            blocks_cached += 1
+            continue
+
         piece_count = mesh_utils.export_block_definition(
             def_name, def_data["geometry"], output_dir, mesh_params)
         if piece_count > 0:
             blocks_exported += 1
+            print("[BlenderSync]   Meshed block: '{}' ({} pieces)".format(
+                def_name, piece_count))
         else:
             # Remove from manifest if no pieces exported
             manifest_data["block_definitions"].pop(def_name, None)
@@ -167,6 +187,9 @@ def blender_sync(quality="preview"):
                 inst for inst in manifest_data["block_instances"]
                 if inst["definition"] != def_name
             ]
+
+    print("[BlenderSync] Blocks: {} meshed, {} cached".format(
+        blocks_exported, blocks_cached))
 
     # Write manifest
     manifest_path = os.path.join(output_dir, "manifest.json")
@@ -187,14 +210,23 @@ def blender_sync(quality="preview"):
 
 # --- Entry point ---
 if __name__ == "__main__" or True:
-    # Detect quality from Rhino command line arguments
-    # Usage: RunPythonScript "path/blender_sync.py" final
     quality = "preview"
+    clean = False
 
-    # Check if "final" was passed (Rhino doesn't have clean arg passing,
-    # so we check sc.sticky for a flag set by the alias)
+    # Check sticky flags set by aliases
     if sc.sticky.get("blendersync_quality") == "final":
         quality = "final"
-        sc.sticky["blendersync_quality"] = None  # reset
+        sc.sticky["blendersync_quality"] = None
+
+    if sc.sticky.get("blendersync_clean"):
+        clean = True
+        sc.sticky["blendersync_clean"] = None
+
+    # Clean = delete all cached OBJs before export
+    if clean:
+        output_dir = _get_output_dir()
+        if output_dir:
+            print("[BlenderSync] Clean export — deleting cached meshes...")
+            _clean_exports(output_dir)
 
     blender_sync(quality)
