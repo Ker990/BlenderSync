@@ -6,62 +6,90 @@ import os
 import time
 
 import Rhino
-import rhinoscriptsyntax as rs
 import scriptcontext as sc
 
+# Max recursion depth for nested blocks (prevent infinite loops)
+_MAX_BLOCK_DEPTH = 10
 
-def _layer_color_rgb(layer_full_path):
-    """Return (R, G, B) tuple for a layer's display color."""
-    color = rs.LayerColor(layer_full_path)
-    return (color.R, color.G, color.B)
+
+def _print(msg):
+    """Print with prefix."""
+    print("[BlenderSync] {}".format(msg))
 
 
 def _get_visible_layers():
-    """Return list of visible layer dicts with path, color, visibility."""
+    """Return list of visible layer dicts using RhinoCommon directly (faster than rs)."""
     layers = []
-    for layer_path in rs.LayerNames():
-        if not rs.IsLayerVisible(layer_path):
+    for layer in sc.doc.Layers:
+        if layer.IsDeleted:
             continue
-        if rs.IsLayerEmpty(layer_path):
+        if not layer.IsVisible:
             continue
+        # Check if layer has any objects (skip empties)
+        # Use RhinoCommon — no rhinoscriptsyntax overhead
         layers.append({
-            "path": layer_path,
-            "color": list(_layer_color_rgb(layer_path)),
+            "path": layer.FullPath,
+            "color": [layer.Color.R, layer.Color.G, layer.Color.B],
             "visible": True,
         })
     return layers
 
 
-def _get_exportable_objects(layer_path):
-    """Return Rhino object IDs on a layer that are Breps, extrusions, or block instances."""
-    all_objs = rs.ObjectsByLayer(layer_path) or []
-    breps = []
-    blocks = []
-    for obj_id in all_objs:
-        if rs.IsObjectHidden(obj_id):
+def _collect_all_objects():
+    """Walk all doc objects once, classify by layer. Much faster than per-layer queries.
+
+    Returns:
+        dict: {layer_full_path: {"breps": [obj_id, ...], "blocks": [obj_id, ...]}}
+    """
+    result = {}
+    visible_layers = set()
+
+    # Pre-build visible layer lookup
+    for layer in sc.doc.Layers:
+        if not layer.IsDeleted and layer.IsVisible:
+            visible_layers.add(layer.Index)
+
+    for rhino_obj in sc.doc.Objects:
+        # Skip hidden objects
+        if rhino_obj.IsHidden:
             continue
-        obj_type = rs.ObjectType(obj_id)
-        # 8 = Surface, 16 = Polysurface, 1073741824 = Extrusion
-        if obj_type in (8, 16, 1073741824):
-            breps.append(obj_id)
-        # 4096 = Block Instance
-        elif obj_type == 4096:
-            blocks.append(obj_id)
-    return breps, blocks
+        # Skip objects on hidden layers
+        layer_idx = rhino_obj.Attributes.LayerIndex
+        if layer_idx not in visible_layers:
+            continue
+
+        layer = sc.doc.Layers[layer_idx]
+        layer_path = layer.FullPath
+
+        if layer_path not in result:
+            result[layer_path] = {"breps": [], "blocks": []}
+
+        obj_type = rhino_obj.ObjectType
+
+        if obj_type in (
+            Rhino.DocObjects.ObjectType.Brep,
+            Rhino.DocObjects.ObjectType.Surface,
+            Rhino.DocObjects.ObjectType.Extrusion,
+        ):
+            result[layer_path]["breps"].append(rhino_obj)
+        elif obj_type == Rhino.DocObjects.ObjectType.InstanceReference:
+            result[layer_path]["blocks"].append(rhino_obj)
+
+    return result
 
 
-def _object_entry(obj_id, layer_path):
-    """Build a manifest entry dict for one Rhino object."""
-    guid = str(obj_id)
-    name = rs.ObjectName(obj_id) or ""
+def _object_entry(rhino_obj, layer_path):
+    """Build a manifest entry dict for one Rhino object (RhinoCommon, no rs)."""
+    guid = str(rhino_obj.Id)
+    name = rhino_obj.Name or ""
     mesh_file = "meshes/{}.obj".format(guid)
 
-    bb = rs.BoundingBox(obj_id)
+    bb = rhino_obj.Geometry.GetBoundingBox(True)
     bbox = None
-    if bb:
+    if bb.IsValid:
         bbox = {
-            "min": [bb[0].X, bb[0].Y, bb[0].Z],
-            "max": [bb[6].X, bb[6].Y, bb[6].Z],
+            "min": [bb.Min.X, bb.Min.Y, bb.Min.Z],
+            "max": [bb.Max.X, bb.Max.Y, bb.Max.Z],
         }
 
     return {
@@ -83,36 +111,79 @@ def _xform_to_list(xform):
     ]
 
 
+def _collect_definition_geometry(idef, depth=0):
+    """Recursively collect meshable geometry from a block definition.
+
+    Returns list of (geometry, xform) tuples in definition-local coords.
+    """
+    if depth > _MAX_BLOCK_DEPTH:
+        _print("  Warning: max block nesting depth reached for '{}'".format(idef.Name))
+        return []
+
+    pieces = []
+    try:
+        for rhino_obj in idef.GetObjects():
+            if isinstance(rhino_obj, Rhino.DocObjects.InstanceObject):
+                nested_idef = rhino_obj.InstanceDefinition
+                nested_xform = rhino_obj.InstanceXform
+                for geom, child_xform in _collect_definition_geometry(nested_idef, depth + 1):
+                    composed = nested_xform * child_xform
+                    pieces.append((geom, composed))
+            else:
+                geom = rhino_obj.Geometry
+                if isinstance(geom, Rhino.Geometry.Extrusion):
+                    geom = geom.ToBrep(True)
+                if isinstance(geom, (Rhino.Geometry.Brep, Rhino.Geometry.Surface)):
+                    pieces.append((geom.Duplicate(), Rhino.Geometry.Transform.Identity))
+    except Exception as e:
+        _print("  Warning: error reading block '{}': {}".format(idef.Name, e))
+
+    return pieces
+
+
 def _collect_block_definitions():
     """Find all in-use block definitions and their instances.
 
     Returns:
-        dict: {def_name: {"objects": [rhino_obj, ...], "instances": [instance_data, ...]}}
+        dict: {def_name: {"geometry": [...], "instances": [...]}}
     """
     definitions = {}
+
+    visible_layers = set()
+    for layer in sc.doc.Layers:
+        if not layer.IsDeleted and layer.IsVisible:
+            visible_layers.add(layer.Index)
 
     for idef in sc.doc.InstanceDefinitions:
         if idef.IsDeleted:
             continue
-        refs = idef.GetReferences(0)  # top-level references only
+
+        try:
+            refs = idef.GetReferences(0)
+        except Exception:
+            continue
+
         if not refs or len(refs) == 0:
             continue
 
-        # Collect meshable geometry from the definition (recursive for nested blocks)
+        _print("  Processing block: '{}' ({} refs)".format(idef.Name, len(refs)))
+
+        # Collect meshable geometry from the definition
         def_objects = _collect_definition_geometry(idef)
         if not def_objects:
+            _print("    No meshable geometry, skipping")
             continue
 
-        # Collect instance placements
+        # Collect visible instance placements
         instances = []
         for inst_obj in refs:
             if inst_obj.IsHidden:
                 continue
             layer_idx = inst_obj.Attributes.LayerIndex
-            layer = sc.doc.Layers[layer_idx]
-            if not layer.IsVisible:
+            if layer_idx not in visible_layers:
                 continue
 
+            layer = sc.doc.Layers[layer_idx]
             instances.append({
                 "instance_id": str(inst_obj.Id),
                 "definition": idef.Name,
@@ -125,31 +196,10 @@ def _collect_block_definitions():
                 "geometry": def_objects,
                 "instances": instances,
             }
+            _print("    {} pieces, {} visible instances".format(
+                len(def_objects), len(instances)))
 
     return definitions
-
-
-def _collect_definition_geometry(idef):
-    """Recursively collect meshable geometry from a block definition.
-
-    Returns list of (geometry, xform) tuples in definition-local coords.
-    """
-    pieces = []
-    for rhino_obj in idef.GetObjects():
-        if isinstance(rhino_obj, Rhino.DocObjects.InstanceObject):
-            # Nested block — recurse and compose transform
-            nested_idef = rhino_obj.InstanceDefinition
-            nested_xform = rhino_obj.InstanceXform
-            for geom, child_xform in _collect_definition_geometry(nested_idef):
-                composed = nested_xform * child_xform
-                pieces.append((geom, composed))
-        else:
-            geom = rhino_obj.Geometry
-            if isinstance(geom, Rhino.Geometry.Extrusion):
-                geom = geom.ToBrep(True)
-            if isinstance(geom, (Rhino.Geometry.Brep, Rhino.Geometry.Surface)):
-                pieces.append((geom.Duplicate(), Rhino.Geometry.Transform.Identity))
-    return pieces
 
 
 def build_manifest(quality="preview"):
@@ -163,7 +213,6 @@ def build_manifest(quality="preview"):
                         objects, block_definitions, block_instances
     """
     doc = Rhino.RhinoDoc.ActiveDoc
-    # doc.Path is the full file path (dir + filename) in Rhino 8
     if doc.Path:
         source_file = doc.Path
     else:
@@ -178,22 +227,28 @@ def build_manifest(quality="preview"):
     }
     units = units_map.get(unit_system, str(unit_system))
 
+    _print("Collecting layers...")
     layers = _get_visible_layers()
+    _print("Found {} visible layers".format(len(layers)))
 
-    # Collect regular objects and block instances per layer
+    # Single pass over all objects — much faster than per-layer rs queries
+    _print("Collecting objects...")
+    objects_by_layer = _collect_all_objects()
+
     objects = []
-    block_instance_ids = set()  # track which instances we already found via layers
-
-    for layer_info in layers:
-        layer_path = layer_info["path"]
-        breps, blocks = _get_exportable_objects(layer_path)
-        for obj_id in breps:
-            entry = _object_entry(obj_id, layer_path)
+    total_breps = 0
+    total_blocks = 0
+    for layer_path, layer_objs in objects_by_layer.items():
+        for rhino_obj in layer_objs["breps"]:
+            entry = _object_entry(rhino_obj, layer_path)
             objects.append(entry)
-        for obj_id in blocks:
-            block_instance_ids.add(str(obj_id))
+            total_breps += 1
+        total_blocks += len(layer_objs["blocks"])
+
+    _print("Found {} breps, {} block instances".format(total_breps, total_blocks))
 
     # Collect block definitions and instances
+    _print("Scanning block definitions...")
     block_defs = _collect_block_definitions()
 
     block_definitions = {}
@@ -204,6 +259,9 @@ def build_manifest(quality="preview"):
         }
         for inst in def_data["instances"]:
             block_instances.append(inst)
+
+    _print("Manifest complete: {} objects, {} block defs, {} block instances".format(
+        len(objects), len(block_definitions), len(block_instances)))
 
     return {
         "source_file": source_file,
@@ -218,11 +276,6 @@ def build_manifest(quality="preview"):
 
 
 def write_manifest(manifest_dict, output_path):
-    """Write manifest dict to a JSON file.
-
-    Args:
-        manifest_dict: dict from build_manifest()
-        output_path: full path to manifest.json
-    """
+    """Write manifest dict to a JSON file."""
     with open(output_path, "w") as f:
         json.dump(manifest_dict, f, indent=2)
