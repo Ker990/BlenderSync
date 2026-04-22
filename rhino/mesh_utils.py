@@ -2,6 +2,7 @@
 """NURBS-to-mesh conversion and OBJ writer for BlenderSync."""
 
 import os
+import System
 
 import Rhino
 import rhinoscriptsyntax as rs
@@ -33,9 +34,12 @@ def brep_to_mesh(obj_id, mesh_params):
     Returns:
         Rhino.Geometry.Mesh or None
     """
-    rhino_obj = sc.doc.Objects.FindId(Rhino.DocObjects.ObjRef(obj_id).ObjectId)
-    if rhino_obj is None:
-        rhino_obj = sc.doc.Objects.Find(obj_id)
+    # Convert string GUID to System.Guid for lookup
+    if isinstance(obj_id, str):
+        guid = System.Guid(obj_id)
+    else:
+        guid = obj_id
+    rhino_obj = sc.doc.Objects.FindId(guid)
     if rhino_obj is None:
         return None
 
