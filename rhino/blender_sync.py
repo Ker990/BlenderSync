@@ -148,7 +148,12 @@ def blender_sync(quality="preview"):
     ]
 
     # Export block definitions
+    print("[BlenderSync] Scanning for block instances...")
     block_defs = manifest_mod._collect_block_definitions()
+    print("[BlenderSync] Found {} block definitions".format(len(block_defs)))
+    for dn, dd in block_defs.items():
+        print("[BlenderSync]   '{}': {} geometry pieces, {} instances".format(
+            dn, len(dd["geometry"]), len(dd["instances"])))
     blocks_exported = 0
     for def_name, def_data in block_defs.items():
         success = mesh_utils.export_block_definition(
