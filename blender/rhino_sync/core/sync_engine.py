@@ -66,46 +66,69 @@ def _find_objects_by_guid():
     return guid_map
 
 
-def _import_obj_mesh(filepath):
-    """Import an OBJ file and return the resulting mesh datablock.
-
-    Imports into a temp object, steals its mesh, deletes the object.
+def _parse_obj_file(filepath):
+    """Parse an OBJ file directly into verts, normals, faces.
 
     Returns:
-        bpy.types.Mesh or None
+        (verts, normals, faces) or None
+        verts: list of (x, y, z)
+        normals: list of (nx, ny, nz)
+        faces: list of (vertex_indices,) — 0-indexed
     """
     if not os.path.exists(filepath):
         return None
 
-    existing = set(bpy.data.objects[:])
+    verts = []
+    normals = []
+    faces = []
 
-    bpy.ops.wm.obj_import(
-        filepath=filepath,
-        up_axis='Z',
-        forward_axis='NEGATIVE_Y',
-    )
-
-    new_objects = [o for o in bpy.data.objects if o not in existing]
-    if not new_objects:
+    try:
+        with open(filepath, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("v "):
+                    parts = line.split()
+                    verts.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                elif line.startswith("vn "):
+                    parts = line.split()
+                    normals.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                elif line.startswith("f "):
+                    parts = line.split()[1:]
+                    face_verts = []
+                    for p in parts:
+                        # Format: v//vn or v/vt/vn or v
+                        vi = int(p.split("/")[0]) - 1  # OBJ is 1-indexed
+                        face_verts.append(vi)
+                    faces.append(tuple(face_verts))
+    except Exception:
         return None
 
-    # Take the mesh from the first imported object
-    source_obj = new_objects[0]
-    mesh = source_obj.data
+    if not verts:
+        return None
 
-    # Remove all imported objects (but not the mesh we're keeping)
-    for obj in new_objects:
-        # Unlink from all collections
-        for col in obj.users_collection:
-            col.objects.unlink(obj)
-        if obj != source_obj:
-            if obj.data and obj.data != mesh and obj.data.users == 1:
-                bpy.data.meshes.remove(obj.data)
-            bpy.data.objects.remove(obj, do_unlink=True)
+    return verts, normals, faces
 
-    # Remove the source object shell, keep the mesh
-    bpy.data.objects.remove(source_obj, do_unlink=True)
 
+def _import_obj_mesh(filepath):
+    """Parse an OBJ file and build a Blender mesh directly (no operator overhead).
+
+    Returns:
+        bpy.types.Mesh or None
+    """
+    parsed = _parse_obj_file(filepath)
+    if parsed is None:
+        return None
+
+    verts, normals, faces = parsed
+
+    mesh = bpy.data.meshes.new(name="imported")
+    mesh.from_pydata(verts, [], faces)
+
+    # Apply normals if we have them
+    if normals and len(normals) == len(verts):
+        mesh.normals_split_custom_set_from_vertices(normals)
+
+    mesh.update()
     return mesh
 
 
